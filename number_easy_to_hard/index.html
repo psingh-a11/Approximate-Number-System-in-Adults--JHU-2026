@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Visual Discrimination Experiment</title>
+    <script src="https://unpkg.com/jspsych@7.3.4"></script>
+    <link href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css" rel="stylesheet" type="text/css" />
+    <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-canvas-keyboard-response@1.1.3"></script>
+    <script src="https://unpkg.com/@jspsych/plugin-preload@1.1.3"></script>
+</head>
+<body style="background-color: rgb(125, 125, 125); color: black; margin: 0; overflow: hidden; font-family: Helvetica, Arial, sans-serif;"></body>
+<script>
+    // --- 1. Prolific Query Parameters Processing ---
+    const getUrlParam = (paramName, defaultValue) => {
+        const urlParams = new URLSearchParams(window.location.search);
+        return urlParams.get(paramName) || defaultValue;
+    };
+
+    const prolificPid = getUrlParam('PROLIFIC_PID', 'N/A_LOCAL_PREVIEW');
+    const prolificStudyId = getUrlParam('STUDY_ID', 'N/A_LOCAL_PREVIEW');
+    const prolificSessionId = getUrlParam('SESSION_ID', 'N/A_LOCAL_PREVIEW');
+    const predetermined_id = "SUBJ_2026_" + Math.floor(Date.now() / 1000);
+
+    // --- 2. Initialize jsPsych ---
+    const jsPsych = initJsPsych();
+
+    // --- 3. Experimental Parameters & Block Sequencing Configuration ---
+    // Fixed condition for this version of the experiment (single block, no random block)
+    const b1_progression = 'Easy-to-Hard';
+    const b1_task = 'Number';
+
+    const base_ratios = [3.0, 2.5, 2.0, 1.5, 1.2, 1.1, 1.05, 1.02, 1.015, 1.01];
+    let b1_ratios = b1_progression === 'Easy-to-Hard' ? [...base_ratios] : [...base_ratios].reverse();
+
+    const ratio_to_dots = {
+        3.0: [15, 5], 2.5: [15, 6], 2.0: [16, 8], 1.5: [15, 10], 1.2: [12, 10],
+        1.1: [11, 10], 1.05: [21, 20], 1.02: [51, 50], 1.015: [68, 67], 1.01: [101, 100]
+    };
+
+    const bounding_box = [-500, -360, 500, 360];
+    const default_total_area = (1200 * 900 * 0.05) * 1.65;
+    const total_experiment_trials = 40;
+    let global_trial_counter = 0;
+
+    // Build lists of image files to preload
+    let images_to_load = [];
+    for (let i = 1; i <= 18; i++) {
+        images_to_load.push(`../InputImages/blue${i}.png`);
+        images_to_load.push(`../InputImages/yellow${i}.png`);
+    }
+
+    let preloaded_images = {};
+    let preload_plugin = {
+        type: jsPsychPreload,
+        images: images_to_load,
+        on_success: function(file) {
+            let img = new Image();
+            img.src = file;
+            preloaded_images[file] = img;
+        }
+    };
+
+    // --- 4. Audio Synthesis Framework ---
+    function playAudioTone(frequency, duration) {
+        try {
+            let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            let oscillator = audioCtx.createOscillator();
+            let gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.type = 'sine';
+            oscillator.frequency.value = frequency;
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration);
+        } catch (e) {
+            console.log("Audio context blocked.");
+        }
+    }
+
+    // --- 5. Spatial Lateral Hemisphere Coordinate Position Generator ---
+    function generateHemispherePositions(num_y, area_y, num_b, area_b, globalUniformSize) {
+        let placed_elements = [];
+
+        function generateBlobCluster(count, area, centerX, color) {
+            let base_w = Math.sqrt(area / count);
+            let elements = [];
+            let minDist = globalUniformSize * 1.15;
+
+            let attempts = 0;
+            while (elements.length < count && attempts < 2000) {
+                attempts++;
+
+                let angle = Math.random() * Math.PI * 2;
+                let maxRadius = Math.max(160, Math.sqrt(count) * base_w * 0.9);
+                let radius = Math.sqrt(Math.random()) * maxRadius;
+
+                let x = centerX + Math.cos(angle) * radius;
+                let y = (Math.random() * 2 - 1) * 220;
+
+                if (color === 'blue' && (x < -460 || x > -60)) continue;
+                if (color === 'yellow' && (x > 460 || x < 60)) continue;
+                if (y < -300 || y > 300) continue;
+
+                let tooClose = false;
+                for (let j = 0; j < elements.length; j++) {
+                    let dx = x - elements[j].x;
+                    let dy = y - elements[j].y;
+                    if (Math.sqrt(dx * dx + dy * dy) < minDist) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (!tooClose) {
+                    elements.push({
+                        x: Math.round(x),
+                        y: Math.round(y),
+                        size: globalUniformSize,
+                        color: color,
+                        tex_id: Math.floor(Math.random() * 18) + 1
+                    });
+                }
+            }
+            return elements;
+        }
+
+        let blueItems = generateBlobCluster(num_b, area_b, -260, 'blue');
+        let yellowItems = generateBlobCluster(num_y, area_y, 260, 'yellow');
+
+        return placed_elements.concat(blueItems, yellowItems);
+    }
+
+    // --- 6. Timeline Assembly Engine Factory ---
+    let timeline = [];
+    timeline.push(preload_plugin);
+
+    function buildBlockTimeline(taskType, isPractice, ratioList) {
+        let trials_config = [];
+        if (isPractice) {
+            for (let i = 0; i < 4; i++) {
+                trials_config.push({
+                    task: taskType,
+                    ratio: 1.5,
+                    dots: taskType === "Area" ? [16, 16] : [45, 30],
+                    base_more: i % 2 === 0 ? 'yellow' : 'blue'
+                });
+            }
+            trials_config = jsPsych.randomization.shuffle(trials_config);
+        } else {
+            ratioList.forEach(r => {
+                let dots = ratio_to_dots[r];
+                let sub_block = [
+                    { task: taskType, ratio: r, dots: dots, base_more: 'yellow' },
+                    { task: taskType, ratio: r, dots: dots, base_more: 'yellow' },
+                    { task: taskType, ratio: r, dots: dots, base_more: 'blue' },
+                    { task: taskType, ratio: r, dots: dots, base_more: 'blue' }
+                ];
+                trials_config.push(...jsPsych.randomization.shuffle(sub_block));
+            });
+        }
+
+        trials_config.forEach((tData, idx) => {
+            let num_yellow, num_blue, area_yellow, area_blue, fixed_size_yellow, fixed_size_blue;
+            let ratio_val = tData.ratio;
+            let positions = [];
+
+            if (tData.task === "Area") {
+                num_yellow = 1; num_blue = 1;
+
+                let block_area_budget = default_total_area * 0.72;
+                let base_dot_area = block_area_budget / 16.0;
+                let larger_dot_area = base_dot_area * ratio_val;
+
+                if (tData.base_more === 'yellow') {
+                    area_yellow = larger_dot_area; area_blue = base_dot_area;
+                } else {
+                    area_blue = larger_dot_area; area_yellow = base_dot_area;
+                }
+
+                // Scaled up by 20% (* 1.2) to make them bigger without changing the proportional area ratio
+                fixed_size_yellow = Math.sqrt(area_yellow) * 1.2;
+                fixed_size_blue = Math.sqrt(area_blue) * 1.2;
+
+                positions = [
+                    {
+                        x: -250,
+                        y: 0,
+                        size: fixed_size_blue,
+                        color: 'blue',
+                        tex_id: Math.floor(Math.random() * 18) + 1
+                    },
+                    {
+                        x: 250,
+                        y: 0,
+                        size: fixed_size_yellow,
+                        color: 'yellow',
+                        tex_id: Math.floor(Math.random() * 18) + 1
+                    }
+                ];
+            } else {
+                if (tData.base_more === 'yellow') {
+                    num_yellow = tData.dots[0]; num_blue = tData.dots[1];
+                } else {
+                    num_blue = tData.dots[0]; num_yellow = tData.dots[1];
+                }
+                area_yellow = default_total_area; area_blue = default_total_area;
+
+                let sharedUniformSize = Math.max(4, Math.round(Math.sqrt((area_yellow + area_blue) / (num_yellow + num_blue))));
+
+                positions = generateHemispherePositions(num_yellow, area_yellow, num_blue, area_blue, sharedUniformSize);
+
+                positions.forEach(p => {
+                    p.size = sharedUniformSize;
+                });
+            }
+
+            let true_target = tData.task === "Number" ? (num_yellow > num_blue ? 'yellow' : 'blue') : (tData.base_more === 'yellow' ? 'yellow' : 'blue');
+
+            // 1. Fixation Screen
+            timeline.push({
+                type: jsPsychHtmlKeyboardResponse,
+                stimulus: '<div style="font-size: 40px; color: black; font-family: Helvetica;">+</div>',
+                choices: "NO_KEYS",
+                trial_duration: 250
+            });
+
+            // 2. Canvas Stimulus Screen (300 ms flash duration)
+            timeline.push({
+                type: jsPsychCanvasKeyboardResponse,
+                canvas_size: [900, 1200],
+                stimulus: function(canvas) {
+                    let ctx = canvas.getContext('2d');
+                    ctx.fillStyle = "rgb(125, 125, 125)";
+                    ctx.fillRect(0, 0, 1200, 900);
+                    ctx.save();
+                    ctx.translate(600, 450);
+                    positions.forEach(p => {
+                        let imgPath = `../InputImages/${p.color}${p.tex_id}.png`;
+                        let img = preloaded_images[imgPath];
+                        if (img) {
+                            ctx.drawImage(img, p.x - p.size/2, -p.y - p.size/2, p.size, p.size);
+                        } else {
+                            ctx.fillStyle = p.color;
+                            ctx.beginPath();
+                            ctx.arc(p.x, -p.y, p.size/2, 0, 2*Math.PI);
+                            ctx.fill();
+                        }
+                    });
+                    ctx.restore();
+                },
+                choices: "NO_KEYS",
+                trial_duration: 350
+            });
+
+            // 3. Choice Matrix Interface
+            let promptText = tData.task === "Number" ? "Identify which category contained more individual shapes.<br><br>Press 'Y' for Yellow<br>Press 'B' for Blue" : "Identify which category contained a larger total pixel area coverage.<br><br>Press 'Y' for Yellow<br>Press 'B' for Blue";
+            timeline.push({
+                type: jsPsychHtmlKeyboardResponse,
+                stimulus: function() {
+                    let barWidth = 0;
+                    if (!isPractice) {
+                        barWidth = (global_trial_counter / total_experiment_trials) * 500;
+                    }
+                    return `
+                        <div style="font-size: 24px; color: black; font-family: Helvetica; text-align: center; height: 500px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin-bottom: 50px;">
+                            ${promptText}
+                        </div>
+                        <div style="position: absolute; bottom: 50px; left: 50%; transform: translateX(-50%); width: 500px; height: 15px; background-color: rgb(120,120,120); border: 1px solid black;">
+                            <div style="width: ${barWidth}px; height: 15px; background-color: rgb(40,180,40);"></div>
+                        </div>
+                    `;
+                },
+                choices: ['y', 'b'],
+                on_finish: function(data) {
+                    let response = data.response === 'y' ? 'yellow' : 'blue';
+                    let correct = response === true_target ? 1 : 0;
+                    if (!isPractice) {
+                        global_trial_counter++;
+                    }
+                    data.ParticipantID = predetermined_id;
+                    data.Prolific_PID = prolificPid;
+                    data.Prolific_StudyID = prolificStudyId;
+                    data.Prolific_SessionID = prolificSessionId;
+                    data.AssignedConditions = `B1-${b1_progression}_${b1_task}`;
+                    data.TaskDimension = tData.task;
+                    data.TrialType = isPractice ? "Practice" : "Progression-Block";
+                    data.TrialNum = idx + 1;
+                    data.Ratio = ratio_val;
+                    data.YellowCount = num_yellow;
+                    data.BlueCount = num_blue;
+                    data.TargetSide = true_target;
+                    data.Response = response;
+                    data.Correct = correct;
+                    // Reaction time: measured from onset of the response screen to the Y/B keypress
+                    data.RT_ms = data.rt;
+                    data.RT = data.rt / 1000;   // seconds
+
+                    if (correct) {
+                        playAudioTone(880, 0.12);
+                    } else {
+                        playAudioTone(140, 0.25);
+                    }
+                }
+            });
+        });
+    }
+
+    // --- 7. Execution Instruction Timelines Block Routines ---
+    // ==================== BLOCK 1 ====================
+    let b1_text = b1_task === "Number" ?
+        `Welcome to the experiment. In this experiment, you will judge mixed arrays based on individual item count.<br><br>Shapes will briefly flash on screen. Your goal is to determine which color group has more individual objects.<br><br>• Press 'Y' for more Yellow items.<br>• Press 'B' for more Blue items.<br><br>If you answer correctly, a high-pitched beep will sound; If you answer incorrectly, a low-pitched buzzer will sound.<br><br>Press the [SPACEBAR] to begin the practice trials.` :
+        `Welcome to the experiment. In this experiment, you will judge mixed arrays based on total cumulative surface area.<br><br>Shapes will briefly flash on screen. Your goal is to determine which color group covers a larger area of the screen.<br><br>• Press 'Y' for more Yellow coverage.<br>• Press 'B' for more Blue coverage.<br><br>If you answer correctly, a high-pitched beep will sound; If you answer incorrectly, a low-pitched buzzer will sound.<br><br>Press the [SPACEBAR] to begin the practice trials.`;
+
+    timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `<div style="font-size: 24px; color: black; font-family: Helvetica; max-width: 850px; text-align: center; margin: auto; line-height: 1.5;">${b1_text}</div>`,
+        choices: [' ']
+    });
+    buildBlockTimeline(b1_task, true, []);
+
+    timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `<div style="font-size: 24px; color: black; font-family: Helvetica; text-align: center; line-height: 1.5;">The practice trials are complete. The formal evaluation trials will begin now.<br><br>Press the [SPACEBAR] to begin.</div>`,
+        choices: [' ']
+    });
+    buildBlockTimeline(b1_task, false, b1_ratios);
+
+    // --- 8. CONCLUSION: Automatic save to the server data folder ---
+    // Data is saved automatically when the end screen appears (no click needed).
+    // It is sent to DataPipe (pipe.jspsych.org), which stores the CSV in your Google Drive (My Drive / DataPipe).
+    // >>> Paste your 12-character DataPipe Experiment ID here: <<<
+    const DATAPIPE_EXPERIMENT_ID = "nCJVkMAsRle7";
+    const completionCode = "YOUR_PROLIFIC_COMPLETION_CODE";
+    const dataFileName = `${b1_task}_${b1_progression}_${predetermined_id}_${prolificPid}.csv`.replace(/[^A-Za-z0-9_.-]/g, '_');
+    const dataColumns = ['ParticipantID', 'Prolific_PID', 'Prolific_StudyID', 'Prolific_SessionID',
+        'AssignedConditions', 'TaskDimension', 'TrialType', 'TrialNum', 'Ratio', 'YellowCount',
+        'BlueCount', 'TargetSide', 'Response', 'Correct', 'RT_ms', 'RT', 'time_elapsed'];
+
+    function buildDataSheet() {
+        // One row per Y/B response (fixation and stimulus-flash rows are left out)
+        let rows = jsPsych.data.get().filterCustom(t => t.Response !== undefined).values();
+        let esc = v => {
+            if (v === undefined || v === null) return '';
+            let str = String(v);
+            return /[",\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+        };
+        let lines = [dataColumns.join(',')];
+        rows.forEach(r => lines.push(dataColumns.map(c => esc(r[c])).join(',')));
+        return lines.join('\n') + '\n';
+    }
+
+    function setEndStatus(html, showButton) {
+        let st = document.getElementById('save-status');
+        let btn = document.getElementById('finish-btn');
+        if (st) st.innerHTML = html;
+        if (btn) btn.style.display = showButton ? 'inline-block' : 'none';
+    }
+
+    function saveDataToServer(attempt) {
+        let csvData = buildDataSheet();
+        fetch('https://pipe.jspsych.org/api/data/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
+            body: JSON.stringify({ experimentID: DATAPIPE_EXPERIMENT_ID, filename: dataFileName, data: csvData })
+        })
+        .then(r => r.json().catch(() => ({})).then(j => ({ ok: r.ok, body: j })))
+        .then(res => {
+            if (!res.ok || res.body.error) throw new Error(res.body.error || ('HTTP error'));
+            setEndStatus('Your data has been saved. Click the button below to return to Prolific and receive credit.', true);
+        })
+        .catch(err => {
+            console.error('Error saving data:', err);
+            if (attempt < 3) {
+                setTimeout(() => saveDataToServer(attempt + 1), 1500);
+            } else {
+                jsPsych.data.get().localSave('csv', dataFileName);
+                setEndStatus('There was a problem saving to the server, so a copy of your data was downloaded to your computer. Please message the researcher on Prolific, then click below to finish.', true);
+            }
+        });
+    }
+
+    window.finishStudy = function() {
+        window.location.href = `https://app.prolific.com/submissions/complete?cc=${completionCode}`;
+    };
+
+    timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+            <div style="font-size: 24px; color: black; font-family: Helvetica; text-align: center; line-height: 1.6; max-width: 800px; margin: auto;">
+                The experiment is now complete.<br>Thank you for your time!<br><br>
+                <div id="save-status">Saving your data, please wait&hellip;</div><br><br>
+                <button id="finish-btn" onclick="window.finishStudy()" style="display: none; background-color: #28a745; color: white; border: none; padding: 15px 32px; text-align: center; font-size: 20px; font-weight: bold; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                    Complete Study &amp; Return to Prolific
+                </button>
+            </div>
+        `,
+        choices: "NO_KEYS",
+        on_load: function() { saveDataToServer(1); }
+    });
+
+    jsPsych.run(timeline);
+</script>
+</html>
